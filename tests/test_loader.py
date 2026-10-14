@@ -137,6 +137,5 @@ def test_loaded_repository_contains_smallepad(
     assert len(repository.cities) == 2_458
     assert len(repository.ranges_by_postcode) == 472_488
     assert (
-        sum(len(ranges) for ranges in repository.ranges_by_postcode.values())
-        == 629_336
+        sum(len(ranges) for ranges in repository.ranges_by_postcode.values()) == 629_336
     )

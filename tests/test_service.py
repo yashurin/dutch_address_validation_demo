@@ -229,9 +229,7 @@ def test_ambiguous_house_number_is_not_guessed(
     ambiguous_service: AddressService,
 ) -> None:
     assert ambiguous_service.lookup_address("2000 AB", 1) == []
-    assert ambiguous_service.validate(
-        "Andere Straat", 1, None, "2000AB", "AMSTERDAM"
-    )
+    assert ambiguous_service.validate("Andere Straat", 1, None, "2000AB", "AMSTERDAM")
     assert ambiguous_service.validate(
         "De Ruyterkade Steigers",
         1,

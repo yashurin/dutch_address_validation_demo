@@ -86,13 +86,17 @@ class DataLoader:
             street_id_text, separator, name = line.partition("~")
             if separator == "":
                 raise DataFileError(path, line_number, "expected street_id~name")
-            street_id = _parse_int(path, line_number, "street_id", street_id_text.strip())
+            street_id = _parse_int(
+                path, line_number, "street_id", street_id_text.strip()
+            )
             try:
                 street = Street(street_id, name.strip())
             except ValueError as exc:
                 raise DataFileError(path, line_number, str(exc)) from exc
             if street_id in streets:
-                raise DataFileError(path, line_number, f"duplicate street id {street_id}")
+                raise DataFileError(
+                    path, line_number, f"duplicate street id {street_id}"
+                )
             streets[street_id] = street
         return streets
 
