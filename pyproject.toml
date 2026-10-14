@@ -18,6 +18,10 @@ address-validation-api = "address_validation.api:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "unit: in-process tests; they do not start a server",
+    "functional: start the API and query it with addresses from the PCS files",
+]
 
 [tool.black]
 line-length = 88
