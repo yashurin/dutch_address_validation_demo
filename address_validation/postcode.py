@@ -27,3 +27,12 @@ def normalise_postcode(postcode: str) -> str:
     if _PC6.fullmatch(compact) is None:
         raise ValueError(f"not a Dutch postcode: {postcode!r}")
     return compact
+
+
+def format_postcode(postcode: str) -> str:
+    """Return the written postcode, with one space: ``"1011 AA"``.
+
+    Accepts the same spellings as :func:`normalise_postcode`.
+    """
+    compact = normalise_postcode(postcode)
+    return f"{compact[:4]} {compact[4:]}"
