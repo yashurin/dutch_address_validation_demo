@@ -1,0 +1,16 @@
+[project]
+name = "address-validation"
+version = "0.1.0"
+description = "In-memory Dutch address validation from the PCS postcode files"
+requires-python = ">=3.13"
+license = "LicenseRef-proprietary"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["address_validation*"]
+
+[tool.setuptools.package-data]
+address_validation = ["py.typed"]
