@@ -1,6 +1,6 @@
 """HTTP API for Dutch address validation.
 
-The process loads the PCS files once, during startup, and serves that
+The process loads the PCS files during startup, and serves that
 in-memory repository. Pass a repository to :func:`create_app` to skip the
 files, which is what the tests do.
 

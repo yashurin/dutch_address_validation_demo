@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from address_validation import (
-    AddressService,
     format_postcode,
     normalise_extension,
     normalise_name,
@@ -20,8 +19,7 @@ def test_postcode_folds_spaces_and_case() -> None:
     assert normalise_postcode("  1011  AA ") == "1011AA"
     assert normalise_postcode("1011AA") == "1011AA"
     assert format_postcode("1011aa") == "1011 AA"
-    assert AddressService.format_postcode("  1011  AA ") == "1011 AA"
-    assert AddressService.normalise_postcode("1011 aa") == "1011AA"
+    assert format_postcode("  1011  AA ") == "1011 AA"
 
 
 @pytest.mark.parametrize("value", ["1011", "1011A", "0011AA", "10111AA", ""])

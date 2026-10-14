@@ -52,9 +52,10 @@ class AddressService:
     repeated on the formatted line; it is not checked against a list of
     known additions.
 
-    The normalisation helpers are :meth:`normalise_postcode`,
-    :meth:`format_postcode`, :meth:`normalise_name` and
-    :meth:`normalise_extension`. :meth:`correct_city` and
+    Spelling rules live in :func:`address_validation.normalise_postcode`,
+    :func:`address_validation.format_postcode`,
+    :func:`address_validation.normalise_name` and
+    :func:`address_validation.normalise_extension`. :meth:`correct_city` and
     :meth:`correct_street` suggest published spellings for a mistyped name.
     """
 
@@ -66,34 +67,6 @@ class AddressService:
     def load(cls, data_dir: str | Path = "data") -> AddressService:
         """Load the three PCS files and return a service for that data."""
         return cls(create_repository(data_dir))
-
-    @staticmethod
-    def normalise_postcode(postcode: str) -> str:
-        """Return the PC6 key ``"1011AA"``. Spaces are removed."""
-        return normalise_postcode(postcode)
-
-    @staticmethod
-    def format_postcode(postcode: str) -> str:
-        """Return the written postcode ``"1011 AA"``."""
-        return format_postcode(postcode)
-
-    @staticmethod
-    def normalise_name(name: str) -> str:
-        """Fold a street or city for comparison.
-
-        Case is ignored, whitespace is collapsed, and apostrophe variants
-        are treated as the same character.
-        """
-        return normalise_name(name)
-
-    @staticmethod
-    def normalise_extension(extension: str | None) -> str | None:
-        """Return a canonical toevoeging, or ``None`` when it is blank.
-
-        ``"a"`` and ``"-A"`` become ``"A"``. ``"BIS"`` becomes ``"bis"``.
-        ``None``, ``""`` and ``"-"`` become ``None``.
-        """
-        return normalise_extension(extension)
 
     def lookup_address(
         self,
@@ -143,8 +116,9 @@ class AddressService:
     ) -> bool:
         """Return whether this address occurs in the reference data.
 
-        ``street`` and ``city`` are compared with :meth:`normalise_name`,
-        so ``"amsterdam"`` matches ``"AMSTERDAM"``. The house number must
+        ``street`` and ``city`` are compared with
+        :func:`address_validation.normalise_name`, so ``"amsterdam"``
+        matches ``"AMSTERDAM"``. The house number must
         fall inside a range for ``postcode``, using that range's odd/even
         parity. ``extension`` may be omitted or written as ``"A"``,
         ``"-a"`` or ``"bis"``; a malformed extension makes the address
@@ -186,8 +160,9 @@ class AddressService:
         """Return ranked, unique city suggestions for a mistyped name.
 
         Each suggestion is the published spelling (``"AMSTERDAM"``). Names
-        are compared after :meth:`normalise_name`, so case, spacing and
-        apostrophes do not matter. Results are best match first. Equal
+        are compared after :func:`address_validation.normalise_name`, so
+        case, spacing and apostrophes do not matter. Results are best match
+        first. Equal
         scores are ordered by casefolded name. At most five names at or
         above the difflib cutoff of 0.6 are returned. An empty name, an
         unusable postcode, or no close match returns ``[]``.
