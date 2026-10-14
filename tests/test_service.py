@@ -1,9 +1,13 @@
-"""AddressService lookup, validation, and normalisation."""
+"""Lookup and validation against the loaded repository.
+
+Cases that the PCS files do not contain use a tiny in-memory repository
+built in the test, so the session load stays shared and the extra cases
+stay cheap.
+"""
 
 from __future__ import annotations
 
-import unittest
-from pathlib import Path
+import pytest
 
 from address_validation import (
     AddressService,
@@ -13,313 +17,225 @@ from address_validation import (
     Parity,
     SeriesKind,
     Street,
-    format_postcode,
-    normalise_extension,
-    normalise_name,
 )
-from address_validation.normalise import resolve_house_number
-from address_validation.service import parse_address_lines
 
-DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+_SMALLEPAD = ["Smallepad 30E", "3811 MG  AMERSFOORT"]
+_SMALLEPAD_BARE = ["Smallepad 30", "3811 MG  AMERSFOORT"]
 
 
-def _service() -> AddressService:
-    ranges = {
-        "1011AA": [
-            HouseNumberRange(3, 9, Parity.ODD, 1, 1000, SeriesKind.STREET),
-            HouseNumberRange(6, 10, Parity.EVEN, 1, 1000, SeriesKind.STREET),
-        ],
-        "1011KM": [
-            HouseNumberRange(1, 5, Parity.ODD, 4, 1000, SeriesKind.STREET),
-            HouseNumberRange(2, 6, Parity.EVEN, 4, 1000, SeriesKind.STREET),
-        ],
-        "1000AA": [
-            HouseNumberRange(1, 49, Parity.ALL, 0, 1000, SeriesKind.PO_BOX),
-        ],
-        "1000PA": [
-            HouseNumberRange(5, 5, Parity.ALL, 0, 1000, SeriesKind.REPLY_NUMBER),
-        ],
-        "1013LC": [
-            HouseNumberRange(0, 0, Parity.NO_NUMBER, 2, 1000, SeriesKind.NO_HOUSE_NUMBER),
-            HouseNumberRange(1, 11, Parity.ODD, 3, 1000, SeriesKind.STREET),
-        ],
-        "2000AB": [
-            HouseNumberRange(1, 9, Parity.ODD, 1, 1000, SeriesKind.STREET),
-            HouseNumberRange(1, 9, Parity.ODD, 5, 1000, SeriesKind.STREET),
-        ],
-    }
-    streets = {
-        1: Street(1, "De Ruyterkade Steigers"),
-        2: Street(2, "Zoutkeetsgracht AB"),
-        3: Street(3, "Zoutkeetsgracht"),
-        4: Street(4, "'s Gravelandseveer"),
-        5: Street(5, "Andere Straat"),
-    }
-    cities = {1000: City(1000, "AMSTERDAM")}
+def test_known_address_smallepad(service: AddressService) -> None:
+    assert service.lookup_address("3811 MG", 30, "E") == _SMALLEPAD
+    assert service.lookup_address("3811mg", "30", "e") == _SMALLEPAD
+    city_line = _SMALLEPAD[1]
+    assert city_line.split("  ") == ["3811 MG", "AMERSFOORT"]
+
+
+def test_missing_extension(service: AddressService) -> None:
+    assert service.lookup_address("3811 MG", 30) == _SMALLEPAD_BARE
+    assert service.lookup_address("3811 MG", 30, "") == _SMALLEPAD_BARE
+    assert service.lookup_address("3811 MG", 30, "-") == _SMALLEPAD_BARE
+    assert service.validate("Smallepad", 30, None, "3811 MG", "AMERSFOORT")
+    assert service.validate("smallepad", "30", "", "3811mg", "amersfoort")
+    assert service.validate("Smallepad", 30, "-", "3811 MG", "Amersfoort")
+
+
+@pytest.mark.parametrize(
+    ("house_number", "expected"),
+    [
+        (30, _SMALLEPAD_BARE),
+        (4, ["Smallepad 4", "3811 MG  AMERSFOORT"]),
+        (90, ["Smallepad 90", "3811 MG  AMERSFOORT"]),
+        (23, ["Smallepad 23", "3811 MG  AMERSFOORT"]),
+        (31, []),
+        (1, []),
+        (92, []),
+    ],
+)
+def test_odd_and_even_ranges(
+    service: AddressService,
+    house_number: int,
+    expected: list[str],
+) -> None:
+    # 3811 MG stores evens 2–90 and odds 3–23, both on Smallepad.
+    assert service.lookup_address("3811 MG", house_number) == expected
+
+
+@pytest.mark.parametrize(
+    "postcode",
+    ["", "   ", "3811", "3811 M", "nope", "0000 AA", None],
+)
+def test_invalid_postcode(service: AddressService, postcode: str | None) -> None:
+    assert service.lookup_address(postcode, 30, "E") == []  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("house_number", ["", "   ", "nope"])
+def test_empty_or_unreadable_house_number(
+    service: AddressService,
+    house_number: str,
+) -> None:
+    assert service.lookup_address("3811 MG", house_number) == []
+
+
+def test_validation_succeeds_for_the_known_address(service: AddressService) -> None:
+    assert service.validate("Smallepad", 30, "E", "3811 MG", "AMERSFOORT")
+    assert service.validate("smallepad", "30e", None, "3811 mg", "amersfoort")
+    assert service.validate_lines(service.lookup_address("3811 MG", 30, "E"))
+    assert service.validate_lines(service.lookup_address("3811 MG", 30))
+
+
+@pytest.mark.parametrize(
+    ("street", "house_number", "extension", "postcode", "city"),
+    [
+        ("Smallepad", 31, None, "3811 MG", "AMERSFOORT"),
+        ("Smallepad", 1, None, "3811 MG", "AMERSFOORT"),
+        ("Andere Straat", 30, None, "3811 MG", "AMERSFOORT"),
+        ("Smallepad", 30, None, "3811 MG", "UTRECHT"),
+        ("Smallepad", 30, "E", "3811", "AMERSFOORT"),
+        ("Smallepad", 30, "E", "", "AMERSFOORT"),
+        ("Smallepad", 30, "E", "nope", "AMERSFOORT"),
+        ("Smallepad", 30, "no spaces", "3811 MG", "AMERSFOORT"),
+        ("Smallepad", "30E", "B", "3811 MG", "AMERSFOORT"),
+        ("", 30, None, "3811 MG", "AMERSFOORT"),
+        ("Smallepad", 30, None, "3811 MG", ""),
+        ("Smallepad", "", None, "3811 MG", "AMERSFOORT"),
+    ],
+)
+def test_validation_failures(
+    service: AddressService,
+    street: str,
+    house_number: int | str,
+    extension: str | None,
+    postcode: str,
+    city: str,
+) -> None:
+    assert not service.validate(street, house_number, extension, postcode, city)
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        ["Smallepad 30E", "3811 MG  AMERSFOORT"],
+        ["smallepad 30 e", "3811 mg amersfoort"],
+        ["", "  Smallepad 30 ", "3811 MG AMERSFOORT"],
+        ["Smallepad 30", "3811 MG  AMERSFOORT"],
+    ],
+)
+def test_validate_lines_accepts_two_line_addresses(
+    service: AddressService,
+    lines: list[str],
+) -> None:
+    assert service.validate_lines(lines)
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        [],
+        [""],
+        ["   ", ""],
+        ["Smallepad 30E"],
+        ["Smallepad 30E", "3811 MG  AMERSFOORT", "extra"],
+        ["Smallepad 30E", "not a postcode"],
+        ["Smallepad 30E", "3811 MG"],
+        ["Smallepad 31", "3811 MG  AMERSFOORT"],
+        ["Andere Straat 30", "3811 MG  AMERSFOORT"],
+        ["Smallepad 30E", "3811 MG  UTRECHT"],
+        ["Smallepad 30E", "0000 AA  AMERSFOORT"],
+        ["", ""],
+    ],
+)
+def test_validate_lines_rejects_bad_addresses(
+    service: AddressService,
+    lines: list[str],
+) -> None:
+    assert not service.validate_lines(lines)
+
+
+def test_extension_round_trip(service: AddressService) -> None:
+    single = service.lookup_address("3811 MG", "30a")
+    assert single[0] == "Smallepad 30A"
+    assert service.validate_lines(single)
+    longer = service.lookup_address("3811 MG", 30, "BIS")
+    assert longer[0] == "Smallepad 30-bis"
+    assert service.validate_lines(longer)
+    assert service.validate("Smallepad", 30, "-a", "3811 MG", "AMERSFOORT")
+    assert service.lookup_address("3811 MG", "30A", "B") == []
+
+
+def test_postbus_reply_and_numberless(service: AddressService) -> None:
+    box = service.lookup_address("1000 AA", 25)
+    assert box == ["Postbus 25", "1000 AA  AMSTERDAM"]
+    assert service.validate("postbus", 25, None, "1000AA", "Amsterdam")
+    assert service.lookup_address("1000 AA", 50) == []
+
+    reply = service.lookup_address("1000 pa", "5")
+    assert reply == ["Antwoordnummer 5", "1000 PA  AMSTERDAM"]
+    assert service.validate_lines(reply)
+
+    bare = service.lookup_address("1013 LC", 0)
+    assert bare == ["Zoutkeetsgracht AB", "1013 LC  AMSTERDAM"]
+    assert service.validate_lines(bare)
+    numbered = service.lookup_address("1013LC", 1)
+    assert numbered[0] == "Zoutkeetsgracht 1"
+    assert not service.validate(
+        "Zoutkeetsgracht AB",
+        1,
+        None,
+        "1013 LC",
+        "AMSTERDAM",
+    )
+
+
+def test_apostrophe_and_doorlopend(service: AddressService) -> None:
+    gravel = service.lookup_address("1011 KM", 1)
+    assert gravel == ["'s Gravelandseveer 1", "1011 KM  AMSTERDAM"]
+    assert service.validate_lines(["\u2019s  Gravelandseveer 1", "1011 km AMSTERDAM"])
+    assert not service.validate(
+        "'s Gravelandseveer",
+        8,
+        None,
+        "1011 KM",
+        "AMSTERDAM",
+    )
+    # Doorlopend series are stored as one odd row and one even row.
+    assert service.lookup_address("1011 MR", 2) == [
+        "Koerierstersplein 2",
+        "1011 MR  AMSTERDAM",
+    ]
+    assert service.lookup_address("1011 MR", 19) == []
+
+
+@pytest.fixture
+def ambiguous_service() -> AddressService:
+    """Two streets contain the same odd numbers. The files do not."""
     return AddressService(
         InMemoryRepository(
-            ranges_by_postcode=ranges,
-            streets=streets,
-            cities=cities,
+            ranges_by_postcode={
+                "2000AB": [
+                    HouseNumberRange(1, 9, Parity.ODD, 1, 1000, SeriesKind.STREET),
+                    HouseNumberRange(1, 9, Parity.ODD, 2, 1000, SeriesKind.STREET),
+                ],
+            },
+            streets={
+                1: Street(1, "De Ruyterkade Steigers"),
+                2: Street(2, "Andere Straat"),
+            },
+            cities={1000: City(1000, "AMSTERDAM")},
         )
     )
 
 
-class NormaliseTests(unittest.TestCase):
-    def test_postcode_display_form(self) -> None:
-        self.assertEqual(format_postcode("1011aa"), "1011 AA")
-        self.assertEqual(AddressService.format_postcode("  1011  AA "), "1011 AA")
-        self.assertEqual(AddressService.normalise_postcode("1011 aa"), "1011AA")
-
-    def test_name_folding(self) -> None:
-        self.assertEqual(normalise_name("  De   Ruyterkade "), "de ruyterkade")
-        self.assertEqual(
-            normalise_name("\u2019s Gravelandseveer"),
-            normalise_name("'s Gravelandseveer"),
-        )
-
-    def test_extension_folding(self) -> None:
-        self.assertEqual(normalise_extension("-a"), "A")
-        self.assertEqual(normalise_extension("BIS"), "bis")
-        self.assertIsNone(normalise_extension(None))
-        self.assertIsNone(normalise_extension(" - "))
-        with self.assertRaises(ValueError):
-            normalise_extension("no spaces")
-        self.assertEqual(resolve_house_number("12-A"), (12, "A"))
-        self.assertEqual(resolve_house_number("12a", "A"), (12, "A"))
-        self.assertEqual(resolve_house_number(7, None), (7, None))
-        with self.assertRaises(ValueError):
-            resolve_house_number("12a", "B")
-
-
-class ServiceTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.service = _service()
-
-    def test_lookup_formats_two_spaces_before_the_city(self) -> None:
-        lines = self.service.lookup_address("1011 aa", 7)
-        self.assertEqual(
-            lines,
-            ["De Ruyterkade Steigers 7", "1011 AA  AMSTERDAM"],
-        )
-        self.assertEqual(lines[1].split("  "), ["1011 AA", "AMSTERDAM"])
-        self.assertTrue(self.service.validate_lines(lines))
-
-    def test_parity_and_postcode_spelling(self) -> None:
-        service = self.service
-        self.assertEqual(service.lookup_address("1011AA", 4), [])
-        self.assertEqual(service.lookup_address("1011 AA", 2), [])
-        self.assertTrue(
-            service.validate(
-                "de ruyterkade steigers",
-                "08",
-                None,
-                "1011aa",
-                "amsterdam",
-            )
-        )
-        self.assertFalse(
-            service.validate(
-                "De Ruyterkade Steigers",
-                4,
-                None,
-                "1011 AA",
-                "AMSTERDAM",
-            )
-        )
-        self.assertFalse(
-            service.validate(
-                "Andere Straat",
-                8,
-                None,
-                "1011 AA",
-                "AMSTERDAM",
-            )
-        )
-
-    def test_extension_is_optional_and_round_trips(self) -> None:
-        service = self.service
-        lines = service.lookup_address("1011 AA", "7a")
-        self.assertEqual(lines[0], "De Ruyterkade Steigers 7A")
-        self.assertTrue(service.validate_lines(lines))
-        bis = service.lookup_address("1011 AA", 8, "BIS")
-        self.assertEqual(bis[0], "De Ruyterkade Steigers 8-bis")
-        self.assertTrue(service.validate_lines(bis))
-        self.assertTrue(
-            service.validate(
-                "De Ruyterkade Steigers",
-                7,
-                "-a",
-                "1011 AA",
-                "AMSTERDAM",
-            )
-        )
-        self.assertEqual(service.lookup_address("1011 AA", "7A", "B"), [])
-        self.assertFalse(
-            service.validate(
-                "De Ruyterkade Steigers",
-                7,
-                "no spaces",
-                "1011 AA",
-                "AMSTERDAM",
-            )
-        )
-
-    def test_postbus_antwoordnummer_and_numberless(self) -> None:
-        service = self.service
-        box = service.lookup_address("1000 AA", 25)
-        self.assertEqual(box, ["Postbus 25", "1000 AA  AMSTERDAM"])
-        self.assertTrue(
-            service.validate("postbus", 25, None, "1000AA", "Amsterdam")
-        )
-        self.assertEqual(service.lookup_address("1000 AA", 50), [])
-
-        reply = service.lookup_address("1000 pa", "5")
-        self.assertEqual(reply, ["Antwoordnummer 5", "1000 PA  AMSTERDAM"])
-        self.assertTrue(service.validate_lines(reply))
-
-        bare = service.lookup_address("1013 LC", 0)
-        self.assertEqual(bare, ["Zoutkeetsgracht AB", "1013 LC  AMSTERDAM"])
-        self.assertTrue(service.validate_lines(bare))
-        numbered = service.lookup_address("1013LC", 1)
-        self.assertEqual(numbered[0], "Zoutkeetsgracht 1")
-        self.assertFalse(
-            service.validate(
-                "Zoutkeetsgracht AB",
-                1,
-                None,
-                "1013 LC",
-                "AMSTERDAM",
-            )
-        )
-
-    def test_ambiguous_house_number_is_not_guessed(self) -> None:
-        service = self.service
-        self.assertEqual(service.lookup_address("2000 AB", 1), [])
-        self.assertTrue(
-            service.validate("Andere Straat", 1, None, "2000AB", "AMSTERDAM")
-        )
-        self.assertTrue(
-            service.validate(
-                "De Ruyterkade Steigers",
-                1,
-                None,
-                "2000 AB",
-                "AMSTERDAM",
-            )
-        )
-
-    def test_validate_lines_accepts_spacing_variants(self) -> None:
-        service = self.service
-        self.assertTrue(
-            service.validate_lines(
-                [
-                    "",
-                    "  de   ruyterkade steigers 7 A ",
-                    "1011 AA AMSTERDAM",
-                ]
-            )
-        )
-        self.assertTrue(
-            service.validate_lines(
-                ["'s Gravelandseveer 1", "1011 km  amsterdam"]
-            )
-        )
-        self.assertTrue(
-            service.validate(
-                "\u2019s Gravelandseveer",
-                1,
-                None,
-                "1011 KM",
-                "Amsterdam",
-            )
-        )
-        self.assertFalse(service.validate_lines(["only one line"]))
-        self.assertFalse(
-            service.validate_lines(
-                [
-                    "De Ruyterkade Steigers 7",
-                    "1011 AA  AMSTERDAM",
-                    "extra",
-                ]
-            )
-        )
-        self.assertIsNone(parse_address_lines("1011 AA  AMSTERDAM"))
-        parsed = parse_address_lines(["Laan 1945 10 bis", "1011 AA  AMSTERDAM"])
-        self.assertEqual(parsed[:3], ("Laan 1945", 10, "bis"))
-
-
-@unittest.skipUnless((DATA_DIR / "PCS_HNR.dat").is_file(), "PCS data files not present")
-class RealServiceTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.service = AddressService.load(DATA_DIR)
-
-    def test_known_street_parity_and_apostrophe(self) -> None:
-        service = self.service
-        lines = service.lookup_address("1011 AA", 7)
-        self.assertEqual(
-            lines,
-            ["De Ruyterkade Steigers 7", "1011 AA  AMSTERDAM"],
-        )
-        self.assertTrue(service.validate_lines(lines))
-        self.assertEqual(service.lookup_address("1011aa", 4), [])
-        self.assertTrue(
-            service.validate(
-                "De Ruyterkade Steigers",
-                6,
-                "A",
-                "1011 aa",
-                "amsterdam",
-            )
-        )
-
-        gravel = service.lookup_address("1011 KM", 1)
-        self.assertEqual(
-            gravel,
-            ["'s Gravelandseveer 1", "1011 KM  AMSTERDAM"],
-        )
-        self.assertTrue(
-            service.validate_lines(
-                ["\u2019s  Gravelandseveer 1", "1011 km AMSTERDAM"]
-            )
-        )
-        self.assertFalse(
-            service.validate(
-                "'s Gravelandseveer",
-                8,
-                None,
-                "1011 KM",
-                "AMSTERDAM",
-            )
-        )
-        # 1011 MR is a doorlopend street, stored as one odd row and one even row.
-        self.assertEqual(
-            service.lookup_address("1011 MR", 2),
-            ["Koerierstersplein 2", "1011 MR  AMSTERDAM"],
-        )
-        self.assertEqual(service.lookup_address("1011 MR", 19), [])
-
-    def test_postbus_reply_and_numberless_from_the_files(self) -> None:
-        service = self.service
-        self.assertEqual(
-            service.lookup_address("1000 AA", 25),
-            ["Postbus 25", "1000 AA  AMSTERDAM"],
-        )
-        self.assertEqual(
-            service.lookup_address("1000 PA", 5),
-            ["Antwoordnummer 5", "1000 PA  AMSTERDAM"],
-        )
-        self.assertEqual(
-            service.lookup_address("1013 LC", 0),
-            ["Zoutkeetsgracht AB", "1013 LC  AMSTERDAM"],
-        )
-        self.assertEqual(
-            service.lookup_address("1013 LC", 1),
-            ["Zoutkeetsgracht 1", "1013 LC  AMSTERDAM"],
-        )
-        self.assertTrue(
-            service.validate_lines(
-                ["Zoutkeetsgracht AB", "1013 LC  AMSTERDAM"]
-            )
-        )
+def test_ambiguous_house_number_is_not_guessed(
+    ambiguous_service: AddressService,
+) -> None:
+    assert ambiguous_service.lookup_address("2000 AB", 1) == []
+    assert ambiguous_service.validate(
+        "Andere Straat", 1, None, "2000AB", "AMSTERDAM"
+    )
+    assert ambiguous_service.validate(
+        "De Ruyterkade Steigers",
+        1,
+        None,
+        "2000 AB",
+        "AMSTERDAM",
+    )

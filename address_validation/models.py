@@ -29,6 +29,12 @@ class SeriesKind(IntEnum):
     NO_HOUSE_NUMBER = 4
 
 
+# Street words for ranges that have no row in PCS_STR.dat. Lookup and
+# street correction both use these spellings.
+PO_BOX_STREET = "Postbus"
+REPLY_STREET = "Antwoordnummer"
+
+
 class Parity(Enum):
     """Which integers inside ``[from_number, to_number]`` belong to the range.
 

@@ -19,13 +19,20 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from address_validation.loader import create_repository
-from address_validation.models import HouseNumberRange, InMemoryRepository, SeriesKind
+from address_validation.models import (
+    PO_BOX_STREET,
+    REPLY_STREET,
+    HouseNumberRange,
+    InMemoryRepository,
+    SeriesKind,
+)
 from address_validation.normalise import (
     normalise_extension,
     normalise_name,
     resolve_house_number,
 )
 from address_validation.postcode import format_postcode, normalise_postcode
+from address_validation.suggest import SuggestionIndex
 
 _STREET_LINE = re.compile(
     r"^(?P<street>.*\S)\s+(?P<number>\d+)\s*[-/]?\s*(?P<extension>.*)$",
@@ -33,9 +40,6 @@ _STREET_LINE = re.compile(
 _POSTCODE_LINE = re.compile(
     r"^(?P<postcode>\d{4}\s*[A-Za-z]{2})\s+(?P<city>\S(?:.*\S)?)\s*$",
 )
-
-_PO_BOX = "Postbus"
-_REPLY = "Antwoordnummer"
 
 
 class AddressService:
@@ -50,11 +54,13 @@ class AddressService:
 
     The normalisation helpers are :meth:`normalise_postcode`,
     :meth:`format_postcode`, :meth:`normalise_name` and
-    :meth:`normalise_extension`.
+    :meth:`normalise_extension`. :meth:`correct_city` and
+    :meth:`correct_street` suggest published spellings for a mistyped name.
     """
 
     def __init__(self, repository: InMemoryRepository) -> None:
         self.repository = repository
+        self._suggestion_index: SuggestionIndex | None = None
 
     @classmethod
     def load(cls, data_dir: str | Path = "data") -> AddressService:
@@ -176,6 +182,57 @@ class AddressService:
         street, house_number, extension, postcode, city = parsed
         return self.validate(street, house_number, extension, postcode, city)
 
+    def correct_city(self, city: str, postcode: str | None = None) -> list[str]:
+        """Return ranked, unique city suggestions for a mistyped name.
+
+        Each suggestion is the published spelling (``"AMSTERDAM"``). Names
+        are compared after :meth:`normalise_name`, so case, spacing and
+        apostrophes do not matter. Results are best match first. Equal
+        scores are ordered by casefolded name. At most five names at or
+        above the difflib cutoff of 0.6 are returned. An empty name, an
+        unusable postcode, or no close match returns ``[]``.
+
+        ``postcode`` limits the candidates:
+
+        * a PC6 (``"1011 AA"`` or ``"1011AA"``) uses only the cities on
+          that postcode, almost always one;
+        * a PC4 (``"1011"``) uses the cities in that district;
+        * ``None`` scores every city. There are about 2,500, so this stays
+          in the milliseconds.
+
+        The first correction on a service builds an index over the
+        repository. Later calls reuse it.
+        """
+        return self._suggestions().correct_city(self.repository, city, postcode)
+
+    def correct_street(self, street: str, postcode: str | None = None) -> list[str]:
+        """Return ranked, unique street suggestions for a mistyped name.
+
+        Same ranking rules as :meth:`correct_city`: published spelling,
+        best score first, at most five names with a difflib ratio of at
+        least 0.6. ``"Postbus"`` and ``"Antwoordnummer"`` are included
+        when that series occurs in the searched postcodes, and on every
+        unscoped search, because those rows have no street in the file.
+
+        Pass a postcode when you have one. A PC6 scores only the streets
+        on that postcode (usually one or two). A PC4 scores the streets
+        in that district, a few dozen on average and a few hundred in the
+        busiest districts. With ``postcode=None`` every distinct street
+        name is scored, about 138,000 of them, which takes a few hundred
+        milliseconds. City correction does not have that cost.
+
+        An empty name, an unusable postcode, or no close match returns
+        ``[]``. The index built by the first correction call is reused.
+        """
+        return self._suggestions().correct_street(self.repository, street, postcode)
+
+    def _suggestions(self) -> SuggestionIndex:
+        index = self._suggestion_index
+        if index is None:
+            index = SuggestionIndex.build(self.repository)
+            self._suggestion_index = index
+        return index
+
     def _labels(
         self,
         matches: list[HouseNumberRange],
@@ -192,10 +249,10 @@ class AddressService:
             if city is None:
                 continue
             if match.kind is SeriesKind.PO_BOX:
-                labels.add((_PO_BOX, city, False))
+                labels.add((PO_BOX_STREET, city, False))
                 continue
             if match.kind is SeriesKind.REPLY_NUMBER:
-                labels.add((_REPLY, city, False))
+                labels.add((REPLY_STREET, city, False))
                 continue
             street = self.repository.street_name(match.street_id)
             if street is None:

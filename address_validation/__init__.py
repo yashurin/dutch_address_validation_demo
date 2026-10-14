@@ -15,6 +15,8 @@ from address_validation.loader import (
 )
 from address_validation.models import (
     MAX_HOUSE_NUMBER,
+    PO_BOX_STREET,
+    REPLY_STREET,
     City,
     HouseNumberRange,
     InMemoryRepository,
@@ -37,7 +39,9 @@ __all__ = [
     "DataLoader",
     "HouseNumberRange",
     "InMemoryRepository",
+    "PO_BOX_STREET",
     "Parity",
+    "REPLY_STREET",
     "SeriesKind",
     "Street",
     "create_repository",
