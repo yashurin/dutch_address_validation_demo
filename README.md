@@ -1,4 +1,4 @@
-# Dutch address validation
+# Dutch address validation demo
 
 In-memory validation of Dutch addresses against the PCS files in `data/`
 (`PCS_HNR.dat`, `PCS_STR.dat`, `PCS_WPL.dat`). A small HTTP API loads those
@@ -304,6 +304,8 @@ Startup again reads the files, hashes them, and builds the suggestion
 index before the port accepts connections. The curl examples above then
 work at `http://127.0.0.1:8000`. `ADDRESS_DATA_DIR` in the image is
 `/app/data`, which is the `source` field of `/api/v1/ready`.
+
+At this point, Docker is a bit redundant. The code runs as it is in the virtual environment. However, it might become useful if we decide to add a database which we can run in a separate Docker container. 
 
 ## Assumptions
 
