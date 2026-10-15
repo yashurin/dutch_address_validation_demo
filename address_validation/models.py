@@ -181,7 +181,7 @@ class City:
 #
 # streets: Mapping[street_id, Street]
 # cities:  Mapping[city_id, City]
-#     One slotted record per id, which is the id -> name index with the
+#     One record per id, which is the id -> name index with the
 #     name stored once on the record. Street id 0 is absent on purpose:
 #     a postbus or antwoordnummer range has no street.
 #

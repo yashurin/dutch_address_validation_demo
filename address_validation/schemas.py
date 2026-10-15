@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -76,16 +76,29 @@ class ValidateLinesRequest(BaseModel):
         return self
 
 
-class ValidateResponse(BaseModel):
-    """Whether the submitted address occurs in the reference data.
+class ValidateMatch(BaseModel):
+    """The address occurs in the reference data.
 
-    ``reason`` is ``not_found`` when the input parsed and the address is
-    absent. It is omitted when ``valid`` is true. Input the parser rejects
-    is HTTP 422 and does not use this body.
+    Input the parser rejects is HTTP 422 and does not use this body.
     """
 
-    valid: bool
-    reason: Literal["not_found"] | None = None
+    model_config = ConfigDict(json_schema_extra={"examples": [{"valid": True}]})
+
+    valid: Literal[True]
+
+
+class ValidateMiss(BaseModel):
+    """The input parsed and the address is not in the extract."""
+
+    model_config = ConfigDict(
+        json_schema_extra={"examples": [{"valid": False, "reason": "not_found"}]}
+    )
+
+    valid: Literal[False]
+    reason: Literal["not_found"]
+
+
+ValidateResponse = Annotated[ValidateMatch | ValidateMiss, Field(discriminator="valid")]
 
 
 class ExtractFileResponse(BaseModel):

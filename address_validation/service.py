@@ -236,7 +236,7 @@ class AddressService:
         the difflib ratio of the folded names. Names are compared after
         :func:`address_validation.normalise_name`, so case, spacing and
         apostrophes do not matter. Results are best match first. Equal
-        scores are ordered by casefolded name. At most five names at or
+        scores are ordered by lowercased name. At most five names at or
         above the difflib cutoff of 0.6 are returned. An exact folded
         match is returned alone, with score 1. ``include_neighbours``
         also returns the other names above the cutoff. An empty name, an

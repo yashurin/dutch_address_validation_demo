@@ -237,6 +237,16 @@ def test_openapi_lists_the_routes(client: TestClient) -> None:
     assert "get" in paths["/api/v1/correct/city"]
     street_params = paths["/api/v1/correct/street"]["get"]["parameters"]
     assert any(param["name"] == "include_neighbours" for param in street_params)
+    document = client.get("/openapi.json").json()
+    schemas = document["components"]["schemas"]
+    assert "reason" not in schemas["ValidateMatch"]["properties"]
+    assert schemas["ValidateMatch"]["properties"]["valid"]["const"] is True
+    assert schemas["ValidateMiss"]["properties"]["reason"]["const"] == "not_found"
+    examples = document["paths"]["/api/v1/validate"]["post"]["responses"]["200"][
+        "content"
+    ]["application/json"]["examples"]
+    assert examples["match"]["value"] == {"valid": True}
+    assert examples["not_found"]["value"] == {"valid": False, "reason": "not_found"}
 
 
 def test_startup_loads_the_data_directory(

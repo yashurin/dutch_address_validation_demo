@@ -118,7 +118,7 @@ def test_limit_keeps_the_best_names() -> None:
     published = tuple(f"Name {index}" for index in range(SUGGESTION_LIMIT + 1))
     normalised = ("same",) * len(published)
     ranked = rank_suggestions("same", normalised, published, None)
-    assert _names(ranked) == sorted(published, key=str.casefold)[:SUGGESTION_LIMIT]
+    assert _names(ranked) == sorted(published, key=str.lower)[:SUGGESTION_LIMIT]
 
 
 @pytest.fixture

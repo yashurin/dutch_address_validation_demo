@@ -31,7 +31,7 @@ _MAX_EXTENSION_LENGTH = 8
 def normalise_name(name: str) -> str:
     """Fold a street or city name for comparison.
 
-    The result is casefolded, with whitespace collapsed to single spaces
+    The result is lowercased, with whitespace collapsed to single spaces
     and apostrophe variants (``'``, ``’``, ``‘``) folded to ``'``.
     ``"  De   Ruyterkade "`` and ``"de ruyterkade"`` both become
     ``"de ruyterkade"``.
@@ -44,14 +44,14 @@ def normalise_name(name: str) -> str:
     folded = " ".join(name.translate(_APOSTROPHES).split())
     if folded == "":
         raise ValueError("name is empty")
-    return folded.casefold()
+    return folded.lower()
 
 
 def normalise_extension(extension: str | None) -> str | None:
     """Return a canonical toevoeging, or ``None`` when it is absent.
 
     ``None``, ``""``, ``"-"`` and ``"/"`` are absent. A single letter is
-    uppercased (``"a"`` becomes ``"A"``). Any longer token is casefolded
+    uppercased (``"a"`` becomes ``"A"``). Any longer token is lowercased
     (``"BIS"`` becomes ``"bis"``). Leading hyphens and slashes are
     removed. Internal spaces are rejected. At most 8 characters.
 
@@ -75,7 +75,7 @@ def normalise_extension(extension: str | None) -> str | None:
         raise ValueError(f"invalid extension {extension!r}")
     if len(text) == 1 and text.isalpha():
         return text.upper()
-    return text.casefold()
+    return text.lower()
 
 
 def resolve_house_number(

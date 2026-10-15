@@ -214,7 +214,7 @@ def rank_suggestions(
     are scored. A name is kept when ``real_quick_ratio``, ``quick_ratio``
     and ``ratio`` all reach ``cutoff``, which is how
     :func:`difflib.get_close_matches` decides. Equal scores are ordered by
-    casefolded published name, then by the published name, so the list
+    lowercased published name, then by the published name, so the list
     does not depend on catalogue order.
 
     When a folded candidate equals ``folded_query`` and
@@ -241,7 +241,7 @@ def rank_suggestions(
         scored.append((score, published[index], folded_name == folded_query))
     if not include_neighbours and any(exact for _score, _name, exact in scored):
         scored = [item for item in scored if item[2]]
-    scored.sort(key=lambda item: (-item[0], item[1].casefold(), item[1]))
+    scored.sort(key=lambda item: (-item[0], item[1].lower(), item[1]))
     unique: list[Suggestion] = []
     seen: set[str] = set()
     for score, name, _exact in scored:

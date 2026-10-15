@@ -32,6 +32,8 @@ from address_validation.schemas import (
     SuggestionHit,
     SuggestionResponse,
     ValidateLinesRequest,
+    ValidateMatch,
+    ValidateMiss,
     ValidateRequest,
     ValidateResponse,
 )
@@ -41,6 +43,24 @@ from address_validation.suggest import Suggestion
 log = logging.getLogger("uvicorn.error")
 
 _API_PREFIX = "/api/v1"
+_VALIDATE_RESPONSES = {
+    200: {
+        "content": {
+            "application/json": {
+                "examples": {
+                    "match": {
+                        "summary": "The address is in the extract",
+                        "value": {"valid": True},
+                    },
+                    "not_found": {
+                        "summary": "The address parsed and is absent",
+                        "value": {"valid": False, "reason": "not_found"},
+                    },
+                }
+            }
+        }
+    }
+}
 
 
 def get_service(request: Request) -> AddressService:
@@ -104,7 +124,7 @@ def create_app(
     @app.post(
         _API_PREFIX + "/validate",
         response_model=ValidateResponse,
-        response_model_exclude_none=True,
+        responses=_VALIDATE_RESPONSES,
     )
     def validate(body: ValidateRequest, service: Service) -> ValidateResponse:
         """Return whether this street, number, postcode, and city occur together.
@@ -122,12 +142,14 @@ def create_app(
             body.postcode,
             body.city,
         )
-        return ValidateResponse(valid=valid, reason=None if valid else "not_found")
+        if valid:
+            return ValidateMatch(valid=True)
+        return ValidateMiss(valid=False, reason="not_found")
 
     @app.post(
         _API_PREFIX + "/validate/lines",
         response_model=ValidateResponse,
-        response_model_exclude_none=True,
+        responses=_VALIDATE_RESPONSES,
     )
     def validate_lines(
         body: ValidateLinesRequest,
@@ -139,8 +161,9 @@ def create_app(
         not parse is HTTP 422. A parsed address that is not in the extract
         returns ``{"valid": false, "reason": "not_found"}``.
         """
-        valid = service.validate_lines(body.lines)
-        return ValidateResponse(valid=valid, reason=None if valid else "not_found")
+        if service.validate_lines(body.lines):
+            return ValidateMatch(valid=True)
+        return ValidateMiss(valid=False, reason="not_found")
 
     @app.get(_API_PREFIX + "/ready", response_model=ReadyResponse)
     def ready(service: Service) -> ReadyResponse:

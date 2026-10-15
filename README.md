@@ -13,18 +13,60 @@ pyproject.toml
 Dockerfile
 ```
 
-The data files are part of this tree. They are not packed into the wheel.
-An archive of the project needs `address_validation/`, `data/`, `tests/`,
-`pyproject.toml`, `README.md`, `Dockerfile`, and `.dockerignore`. Leave out
-`.venv/`, `__pycache__/`, and `.pytest_cache/`.
+
+## Choices relative to the assignment
+
+The five routines suggested for the implementation are snake_case methods on `AddressService`.
+
+| Brief | This code |
+| --- | --- |
+| `lookupAddress` | `AddressService.lookup_address` |
+| `validate` | `AddressService.validate` |
+| `validateLines` | `AddressService.validate_lines` |
+| `correctCity` | `AddressService.correct_city` |
+| `correctStreet` | `AddressService.correct_street` |
+
+The code is a package (`models`, `loader`,
+`service`, `suggest`, `api`) so loading, matching, and the HTTP layer stay
+separate for better readability and maintainability. `AddressService` is the entry point for the five routines.
+
+Lookup accepts one string, with the two lines separated by a
+newline or a semicolon. `lookup_address` returns a `LookupResult`: the
+street line and the city line, or no lines together with `not_found` or
+`ambiguous`. The API returns that pair as
+`lines`.
+
+`validate` and `validate_lines` return true or false once the address has
+parsed. Input the parser rejects raises `InvalidAddress`. The API returns
+HTTP 422 for that error and `{"valid": false, "reason": "not_found"}` for
+a parsed miss.
+
+The suggested house number is an `int`, and the extension is a required
+`str`. Here the house number may also be a string such as `"30E"`, and the
+extension may be omitted. Many addresses have no toevoeging.
+
+`correct_city` and `correct_street` are described as a list of names. They
+return `Suggestion` values: the published spelling and the difflib ratio.
+An exact match on the lowercased name is returned alone.
+`include_neighbours` adds the other names at or above 0.6, at most five in
+total. A partial name yields candidate street or city names. It
+does not expand into formatted postal addresses. The suggested routines
+stop at the names, and this program stays with those five operations.
+
+Street and city text on a result is the spelling stored in the PCS files.
+The sample box writes `Amersfoort`. `PCS_WPL.dat` stores `AMERSFOORT`.
+
+The validation path does not import FastAPI. FastAPI and Uvicorn implement
+the optional JSON API. There is no DB. A lookup reads the ranges of one postcode from memory.
+
 
 ## Development environment
 
-Python 3.13 or newer. The library itself uses the standard library. The API
+Python 3.13 or newer with the standard library. The API
 adds FastAPI and Uvicorn. Tests add pytest and httpx. Black and Ruff are the
-formatter and the linter (line length 88; Ruff selects E, F, I, UP, and B).
+formatter and the linter (line length 88; Ruff selects E, F, I, UP, B and ANN).
 
-No database and no network call to an address service. After the files are
+After the files are
 on disk, lookup and validation run locally. Startup hashes each file and
 builds the street and city suggestion index before the process accepts
 connections.
@@ -41,8 +83,7 @@ pip install -e ".[dev]"
 ```
 
 `pip install -e .` is enough to run the API. The `dev` extra adds pytest,
-httpx, Black, and Ruff. On Windows the activate script is
-`.venv\Scripts\activate`.
+httpx, Black, and Ruff. 
 
 ```bash
 address-validation-api
@@ -154,7 +195,7 @@ curl -sG "http://127.0.0.1:8000/api/v1/correct/city" \
 
 ## Algorithm and data structures
 
-The loader streams the three tilde-separated files into one
+The loader streams the three files into one
 `InMemoryRepository`:
 
 - `ranges_by_postcode` maps a normalised PC6 (`"1011 AA"` becomes
@@ -204,7 +245,7 @@ cached on the matcher, then each candidate is rejected with
 is 0.6 and at most five names are returned, best score first. An exact
 folded match is returned alone. `include_neighbours` puts the other names
 above the cutoff back in the list, exact match first. Equal scores are
-ordered by casefolded name, then by the published name. A PC6 limits the
+ordered by lowercased name, then by the published name. A PC6 limits the
 candidates to that postcode. A PC4 limits them to that district. The index
 is built when the service is created, which for the API is during startup,
 before the port accepts connections. With no postcode every distinct city
@@ -241,7 +282,7 @@ pytest -m functional
 ```
 
 `pytest` with no arguments runs both. Functional tests need `data/` and the
-`dev` (or `test`) extra, because they speak HTTP. The unscoped street
+`dev` (or `test`) extra, because they use HTTP. The unscoped street
 suggestion runs once in that session.
 
 ```bash
@@ -263,3 +304,94 @@ Startup again reads the files, hashes them, and builds the suggestion
 index before the port accepts connections. The curl examples above then
 work at `http://127.0.0.1:8000`. `ADDRESS_DATA_DIR` in the image is
 `/app/data`, which is the `source` field of `/api/v1/ready`.
+
+## Assumptions
+
+The loader accepts the three PCS files as they are published: tilde
+separated, space padded, UTF-8. Kind, parity, and street id stay in
+the combinations that extract uses. A street or postbus row that breaks
+those combinations is rejected. A PC6 is treated as having one city. The
+current files have that shape. The loader does not check it. 
+
+When one
+house number would produce two street or city labels, lookup reports
+`ambiguous` and does not choose. In this extract that overlap was not
+found. Validate still accepts the address when the supplied street and
+city match one of the labels.
+
+Odd, even, and doorlopend ranges contain every second integer from the
+start. Doorlopend numbering is stored as one odd row and one even row, so
+`D` is not "every integer". A blank parity matches every integer in the
+span. Parity `G` is only the span 0–0. House number 0 means the street
+has no number. House numbers run from 0 through 99999. 
+
+Each postcode holds few ranges, so those tuples are scanned linearly.
+Street and city strings are stored once and
+referenced by id. After load, the maps are read-only and each postcode's
+ranges are a tuple.
+
+Name comparison lowercases, collapses whitespace, and maps `` ` ``, `'`,
+and the curly apostrophes to `'`. Other punctuation stays. `ij` and `y`
+are not treated as the same letter, and abbreviations are not expanded.
+`lower()` matches `casefold()` on the ASCII names in this extract. A
+caller who types `ß` does not match a name stored as `ss`. The text
+returned to the caller is the spelling in the file. A street suffix
+` AB` is part of the name.
+
+The files do not list toevoegingen. Any well-formed extension is accepted
+and is not checked against the building. A single letter is uppercased
+and glued on. A longer token is lowercased and hyphenated, at most 8
+characters, letters, digits, and internal hyphens. On a numberless address
+the extension is accepted by validate and left off the printed line. In
+the two-line form, the last number on the street line is the house number,
+so `Laan 1945 10` keeps `Laan 1945` as the street. The city line parses
+with any whitespace after the postcode. Formatting writes two spaces.
+
+Suggestions use a difflib ratio of at least 0.6 and return at most five
+names. Equal scores are ordered by the lowercased published name, then by
+the published name. For correction, a PC4 is exactly four digits with a
+first digit other than 0. Anything else must be a PC6. Only `postcode`
+omitted entirely searches the whole catalogue. An empty postcode is an
+unusable scope and returns no suggestions. An empty name does the same.
+`Postbus` and `Antwoordnummer` are synthetic street names: they appear on
+every unscoped street search, and inside a PC4 or PC6 only when that scope
+contains the series. Two street ids that share a published name produce
+one suggestion.
+
+One `AddressService` lives for the life of the process. Replacing the
+files on disk does nothing until restart. Lookup and validate are reads
+of one postcode. 
+
+Unscoped street correction scores the whole street
+catalogue and is the expensive call. The endpoints are synchronous. There
+is no authentication and no quota. 
+
+Tests that name real addresses, top
+suggestion lists, and row counts are pinned to this PCS drop. A newer
+drop can fail those tests without a change in the matching rules.
+
+Validate and the two correction calls stay on different HTTP shapes.
+Validate submits an address document, so it is a JSON body. Lookup,
+correction, and readiness are reads of a few fields, so they stay query
+parameters.
+
+## Further improvements
+
+The five routines return a
+verdict, two postal lines, or candidate names. A search that turned
+`Smalle` in `3811` into postal lines would be a new operation.
+
+Restart still parses the text files. A compact snapshot, loaded into the
+same PC6 dictionary, would shorten startup. A database is useful there.
+
+Reload without a restart means building a second repository and swapping
+it onto the app when the snapshot changes. In-flight requests would keep
+the previous service. The maps are already frozen, so a request cannot
+see a half-built table.
+
+Running it as a service would add a network policy or authentication, a
+limit on unscoped street correction, and logs for load time and correction time. 
+
+Batch
+validate, many addresses in one request against the same repository, is
+the usual next call for a postal pipeline.
