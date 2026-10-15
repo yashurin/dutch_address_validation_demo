@@ -6,18 +6,23 @@ two spaces before the city::
     De Ruyterkade Steigers 7A
     1011 AA  AMSTERDAM
 
-:meth:`AddressService.lookup_address` returns those two strings, or an
-empty list when the postcode and house number are not in the reference
-data. :meth:`AddressService.validate_lines` parses that same shape and
-calls :meth:`AddressService.validate`.
+:meth:`AddressService.lookup_address` returns those two strings when one
+street contains the number. A parsed postcode that does not contain the
+number is :attr:`LookupReason.NOT_FOUND`. The same number on more than
+one street is :attr:`LookupReason.AMBIGUOUS`. Input the parser rejects
+raises :class:`InvalidAddress`. :meth:`AddressService.validate_lines`
+parses that same shape and calls :meth:`AddressService.validate`.
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
+from address_validation.extract import ExtractRecord
 from address_validation.loader import create_repository
 from address_validation.models import (
     PO_BOX_STREET,
@@ -32,7 +37,36 @@ from address_validation.normalise import (
     resolve_house_number,
 )
 from address_validation.postcode import format_postcode, normalise_postcode
-from address_validation.suggest import SuggestionIndex
+from address_validation.suggest import Suggestion, SuggestionIndex
+
+
+class InvalidAddress(ValueError):
+    """Input the address parser rejects.
+
+    The reference data was not consulted. The HTTP API returns 422.
+    """
+
+
+class LookupReason(StrEnum):
+    """Why a parsed lookup produced no lines."""
+
+    NOT_FOUND = "not_found"
+    AMBIGUOUS = "ambiguous"
+
+
+@dataclass(frozen=True, slots=True)
+class LookupResult:
+    """Postal lines, or an empty tuple with a reason.
+
+    ``reason`` is ``None`` when ``lines`` holds the street line and the
+    city line. ``not_found`` means the postcode is a PC6 and no range
+    contains the house number. ``ambiguous`` means more than one street
+    contains it, so the lines are not guessed.
+    """
+
+    lines: tuple[str, ...]
+    reason: LookupReason | None
+
 
 _STREET_LINE = re.compile(
     r"^(?P<street>.*\S)\s+(?P<number>\d+)\s*[-/]?\s*(?P<extension>.*)$",
@@ -57,24 +91,42 @@ class AddressService:
     :func:`address_validation.normalise_name` and
     :func:`address_validation.normalise_extension`. :meth:`correct_city` and
     :meth:`correct_street` suggest published spellings for a mistyped name.
+
+    Construction builds the suggestion index and records the extract, so a
+    service is ready for correction as soon as it exists. :meth:`load`
+    hashes the three PCS files into :attr:`extract`.
     """
 
-    def __init__(self, repository: InMemoryRepository) -> None:
+    def __init__(
+        self,
+        repository: InMemoryRepository,
+        extract: ExtractRecord | None = None,
+    ) -> None:
         self.repository = repository
-        self._suggestion_index: SuggestionIndex | None = None
+        self.extract = (
+            extract
+            if extract is not None
+            else ExtractRecord.from_repository(repository)
+        )
+        self.suggestion_index = SuggestionIndex.build(repository)
 
     @classmethod
     def load(cls, data_dir: str | Path = "data") -> AddressService:
-        """Load the three PCS files and return a service for that data."""
-        return cls(create_repository(data_dir))
+        """Load the three PCS files and return a service for that data.
+
+        The returned service has already hashed those files and built the
+        suggestion index.
+        """
+        repository = create_repository(data_dir)
+        return cls(repository, ExtractRecord.from_directory(data_dir, repository))
 
     def lookup_address(
         self,
         postcode: str,
         house_number: int | str,
         extension: str | None = None,
-    ) -> list[str]:
-        """Return ``[street_line, city_line]``, or ``[]`` when unknown.
+    ) -> LookupResult:
+        """Return the two postal lines, or a reason and no lines.
 
         ``city_line`` is the postcode, two spaces, and the city in the
         published spelling (``"1011 AA  AMSTERDAM"``). A single-letter
@@ -86,25 +138,34 @@ class AddressService:
         A numberless range (house number 0) is formatted as the street
         name alone; an extension on that call is accepted and not printed.
 
-        The result is ``[]`` when the postcode or house number is not in
-        the data, the extension is not well-formed, or more than one
-        street contains that house number. Parity is respected: ``4`` does
-        not match a range of odd numbers.
+        A well-formed postcode whose ranges do not contain the number is
+        :attr:`LookupReason.NOT_FOUND`. More than one street containing
+        that number is :attr:`LookupReason.AMBIGUOUS`. Parity is respected:
+        ``4`` does not match a range of odd numbers.
+
+        Raises:
+            InvalidAddress: The postcode, house number, or extension cannot
+                be parsed.
         """
         try:
             number, addition = resolve_house_number(house_number, extension)
             matches = self.repository.matching_ranges(postcode, number)
-            labels = self._labels(matches)
-        except (TypeError, ValueError):
-            return []
+        except (TypeError, ValueError) as exc:
+            raise InvalidAddress(str(exc)) from exc
+        labels = self._labels(matches)
+        if not labels:
+            return LookupResult((), LookupReason.NOT_FOUND)
         if len(labels) != 1:
-            return []
+            return LookupResult((), LookupReason.AMBIGUOUS)
         street, city, numberless = labels.pop()
         if numberless:
             street_line = street
         else:
             street_line = format_street_line(street, number, addition)
-        return [street_line, format_city_line(postcode, city)]
+        return LookupResult(
+            (street_line, format_city_line(postcode, city)),
+            None,
+        )
 
     def validate(
         self,
@@ -118,20 +179,25 @@ class AddressService:
 
         ``street`` and ``city`` are compared with
         :func:`address_validation.normalise_name`, so ``"amsterdam"``
-        matches ``"AMSTERDAM"``. The house number must
-        fall inside a range for ``postcode``, using that range's odd/even
-        parity. ``extension`` may be omitted or written as ``"A"``,
-        ``"-a"`` or ``"bis"``; a malformed extension makes the address
-        invalid. Postbus and antwoordnummer addresses use those words as
-        the street.
+        matches ``"AMSTERDAM"``. The house number must fall inside a range
+        for ``postcode``, using that range's odd/even parity. ``extension``
+        may be omitted or written as ``"A"``, ``"-a"`` or ``"bis"``.
+        Postbus and antwoordnummer addresses use those words as the street.
+        False means the input parsed and the address is not in the extract.
+        When several streets contain the number, any supplied label that
+        matches one of them is valid.
+
+        Raises:
+            InvalidAddress: The postcode, house number, extension, street,
+                or city cannot be parsed.
         """
         try:
             number, _addition = resolve_house_number(house_number, extension)
             street_key = normalise_name(street)
             city_key = normalise_name(city)
             matches = self.repository.matching_ranges(postcode, number)
-        except (TypeError, ValueError):
-            return False
+        except (TypeError, ValueError) as exc:
+            raise InvalidAddress(str(exc)) from exc
         for street_name, city_name, _numberless in self._labels(matches):
             if (
                 normalise_name(street_name) == street_key
@@ -140,7 +206,7 @@ class AddressService:
                 return True
         return False
 
-    def validate_lines(self, lines: list[str]) -> bool:
+    def validate_lines(self, lines: Sequence[str]) -> bool:
         """Parse a two-line address and return :meth:`validate`.
 
         Blank lines are ignored. After that, exactly two lines are
@@ -149,22 +215,31 @@ class AddressService:
         0, which is how numberless ranges are written. The second line is
         a postcode and a city, separated by one or more spaces; the
         formatted form uses two.
+
+        Raises:
+            InvalidAddress: The lines are not a two-line address, or a
+                field in them cannot be parsed.
         """
-        parsed = parse_address_lines(lines)
-        if parsed is None:
-            return False
-        street, house_number, extension, postcode, city = parsed
+        street, house_number, extension, postcode, city = parse_address_lines(lines)
         return self.validate(street, house_number, extension, postcode, city)
 
-    def correct_city(self, city: str, postcode: str | None = None) -> list[str]:
+    def correct_city(
+        self,
+        city: str,
+        postcode: str | None = None,
+        *,
+        include_neighbours: bool = False,
+    ) -> list[Suggestion]:
         """Return ranked, unique city suggestions for a mistyped name.
 
-        Each suggestion is the published spelling (``"AMSTERDAM"``). Names
-        are compared after :func:`address_validation.normalise_name`, so
-        case, spacing and apostrophes do not matter. Results are best match
-        first. Equal
+        Each suggestion is the published spelling (``"AMSTERDAM"``) and
+        the difflib ratio of the folded names. Names are compared after
+        :func:`address_validation.normalise_name`, so case, spacing and
+        apostrophes do not matter. Results are best match first. Equal
         scores are ordered by casefolded name. At most five names at or
-        above the difflib cutoff of 0.6 are returned. An empty name, an
+        above the difflib cutoff of 0.6 are returned. An exact folded
+        match is returned alone, with score 1. ``include_neighbours``
+        also returns the other names above the cutoff. An empty name, an
         unusable postcode, or no close match returns ``[]``.
 
         ``postcode`` limits the candidates:
@@ -175,18 +250,29 @@ class AddressService:
         * ``None`` scores every city. There are about 2,500, so this stays
           in the milliseconds.
 
-        The first correction on a service builds an index over the
-        repository. Later calls reuse it.
+        The suggestion index is built when the service is created.
         """
-        return self._suggestions().correct_city(self.repository, city, postcode)
+        return self.suggestion_index.correct_city(
+            self.repository,
+            city,
+            postcode,
+            include_neighbours=include_neighbours,
+        )
 
-    def correct_street(self, street: str, postcode: str | None = None) -> list[str]:
+    def correct_street(
+        self,
+        street: str,
+        postcode: str | None = None,
+        *,
+        include_neighbours: bool = False,
+    ) -> list[Suggestion]:
         """Return ranked, unique street suggestions for a mistyped name.
 
         Same ranking rules as :meth:`correct_city`: published spelling,
-        best score first, at most five names with a difflib ratio of at
-        least 0.6. ``"Postbus"`` and ``"Antwoordnummer"`` are included
-        when that series occurs in the searched postcodes, and on every
+        difflib ratio, best score first, at most five names at or above
+        0.6, and an exact folded match alone unless ``include_neighbours``
+        is set. ``"Postbus"`` and ``"Antwoordnummer"`` are included when
+        that series occurs in the searched postcodes, and on every
         unscoped search, because those rows have no street in the file.
 
         Pass a postcode when you have one. A PC6 scores only the streets
@@ -197,20 +283,18 @@ class AddressService:
         milliseconds. City correction does not have that cost.
 
         An empty name, an unusable postcode, or no close match returns
-        ``[]``. The index built by the first correction call is reused.
+        ``[]``. The suggestion index is built when the service is created.
         """
-        return self._suggestions().correct_street(self.repository, street, postcode)
-
-    def _suggestions(self) -> SuggestionIndex:
-        index = self._suggestion_index
-        if index is None:
-            index = SuggestionIndex.build(self.repository)
-            self._suggestion_index = index
-        return index
+        return self.suggestion_index.correct_street(
+            self.repository,
+            street,
+            postcode,
+            include_neighbours=include_neighbours,
+        )
 
     def _labels(
         self,
-        matches: list[HouseNumberRange],
+        matches: tuple[HouseNumberRange, ...],
     ) -> set[tuple[str, str, bool]]:
         """Unique ``(street, city, numberless)`` labels for ``matches``.
 
@@ -252,30 +336,34 @@ def format_city_line(postcode: str, city: str) -> str:
 
 def parse_address_lines(
     lines: Sequence[str],
-) -> tuple[str, int, str | None, str, str] | None:
+) -> tuple[str, int, str | None, str, str]:
     """Parse two address lines into street, number, extension, postcode, city.
 
-    Returns ``None`` when ``lines`` is not a two-line address. A street
-    line without a house number yields house number ``0`` and no extension.
-    The last number on the street line is the house number, so a street
-    such as ``"Laan 1945 10"`` keeps ``"Laan 1945"`` as the name.
+    A street line without a house number yields house number ``0`` and no
+    extension. The last number on the street line is the house number, so
+    a street such as ``"Laan 1945 10"`` keeps ``"Laan 1945"`` as the name.
+    A ``str`` is not a sequence of lines.
+
+    Raises:
+        InvalidAddress: ``lines`` is not two non-blank strings, or a field
+            in them cannot be parsed.
     """
     if isinstance(lines, str) or not isinstance(lines, Sequence):
-        return None
+        raise InvalidAddress("address lines must be two strings")
     content: list[str] = []
     for line in lines:
         if not isinstance(line, str):
-            return None
+            raise InvalidAddress("address lines must be two strings")
         stripped = line.strip()
         if stripped:
             content.append(stripped)
     if len(content) != 2:
-        return None
+        raise InvalidAddress("exactly two non-blank address lines are required")
     try:
         street, house_number, extension = _parse_street_line(content[0])
         postcode, city = _parse_postcode_line(content[1])
-    except ValueError:
-        return None
+    except (TypeError, ValueError) as exc:
+        raise InvalidAddress(str(exc)) from exc
     return street, house_number, extension, postcode, city
 
 

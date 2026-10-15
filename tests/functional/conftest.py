@@ -1,7 +1,9 @@
 """Start the installed API once, against the PCS files in ``data/``.
 
 The process is ``python -m address_validation``, the same entry point a
-fresh virtualenv runs. Queries go over HTTP to that process.
+fresh virtualenv runs. The suite waits until ``/api/v1/ready`` reports
+that the extract and the suggestion index are loaded, then sends queries
+over HTTP.
 """
 
 from __future__ import annotations
@@ -71,11 +73,11 @@ def api_client(tmp_path_factory: pytest.TempPathFactory) -> Iterator[httpx.Clien
             if process.poll() is not None:
                 break
             try:
-                response = httpx.get(f"{base}/openapi.json", timeout=1)
+                response = httpx.get(f"{base}/api/v1/ready", timeout=1)
             except httpx.HTTPError:
                 time.sleep(0.2)
                 continue
-            if response.status_code == 200:
+            if response.status_code == 200 and response.json().get("ready") is True:
                 ready = True
                 break
             time.sleep(0.2)

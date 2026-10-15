@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from address_validation import (
+    InvalidAddress,
     format_postcode,
     normalise_extension,
     normalise_name,
@@ -54,6 +55,6 @@ def test_house_number_and_extension_agree() -> None:
 
 def test_last_number_on_the_street_line_is_the_house_number() -> None:
     parsed = parse_address_lines(["Laan 1945 10 bis", "3811 MG  AMERSFOORT"])
-    assert parsed is not None
     assert parsed[:3] == ("Laan 1945", 10, "bis")
-    assert parse_address_lines("3811 MG  AMERSFOORT") is None
+    with pytest.raises(InvalidAddress, match="two strings"):
+        parse_address_lines("3811 MG  AMERSFOORT")

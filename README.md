@@ -25,8 +25,9 @@ adds FastAPI and Uvicorn. Tests add pytest and httpx. Black and Ruff are the
 formatter and the linter (line length 88; Ruff selects E, F, I, UP, and B).
 
 No database and no network call to an address service. After the files are
-on disk, lookup and validation run locally. The first city or street
-correction builds a name index in the process; later corrections reuse it.
+on disk, lookup and validation run locally. Startup hashes each file and
+builds the street and city suggestion index before the process accepts
+connections.
 
 Place the three files in `data/` under these names. Start commands from the
 repository root, or set `ADDRESS_DATA_DIR` to that directory.
@@ -53,9 +54,11 @@ The same server is `python -m address_validation`, or:
 uvicorn address_validation.api:app --host 127.0.0.1 --port 8000
 ```
 
-Startup reads the three files before the process accepts connections. That
-takes a couple of seconds. `ADDRESS_HOST` and `ADDRESS_PORT` change the bind
-address (`127.0.0.1:8000` by default). Interactive docs are at
+Startup reads the three files, records a SHA-256 of each, and builds the
+suggestion index before the process accepts connections. That takes a
+couple of seconds. `GET /api/v1/ready` then reports the loaded counts and
+those hashes. `ADDRESS_HOST` and `ADDRESS_PORT` change the bind address
+(`127.0.0.1:8000` by default). Interactive docs are at
 <http://127.0.0.1:8000/docs>.
 
 `create_app(repository)` builds an app around an existing
@@ -65,7 +68,10 @@ path. The functional tests and `address-validation-api` load `data/`.
 ## API examples
 
 Lookup `3811 MG`, house number `30`, extension `E`. The city line has two
-spaces before the city. An unknown address returns `{"lines": []}`.
+spaces before the city. A postcode that parses but does not contain the
+number returns `{"lines": [], "reason": "not_found"}`. The same number on
+more than one street returns `"reason": "ambiguous"` and no lines. A
+postcode, house number, or extension the parser rejects is HTTP 422.
 
 ```bash
 curl -sG "http://127.0.0.1:8000/api/v1/lookup" \
@@ -78,8 +84,10 @@ curl -sG "http://127.0.0.1:8000/api/v1/lookup" \
 {"lines":["Smallepad 30E","3811 MG  AMERSFOORT"]}
 ```
 
-Validate the same address. A miss, including a bad postcode or an empty
-field, returns `{"valid": false}`. A missing JSON field is HTTP 422.
+Validate the same address. A parsed address that is not in the extract
+returns `{"valid": false, "reason": "not_found"}`. A bad postcode, an
+empty name, or a malformed extension is HTTP 422, as is a missing JSON
+field.
 
 ```bash
 curl -s -X POST "http://127.0.0.1:8000/api/v1/validate" \
@@ -91,9 +99,31 @@ curl -s -X POST "http://127.0.0.1:8000/api/v1/validate" \
 {"valid":true}
 ```
 
-Suggest a street. `postcode` may be a PC6 (`3811 MG`) or a PC4 (`3811`).
-Leave it out to search every street; that call takes a few hundred
-milliseconds.
+The same check accepts the two postal lines. Blank lines are ignored.
+Exactly two remaining lines are required, and a line that does not parse
+is HTTP 422. A pair that parses but is not in the extract returns
+`{"valid": false, "reason": "not_found"}`.
+
+```bash
+curl -s -X POST "http://127.0.0.1:8000/api/v1/validate/lines" \
+  -H "Content-Type: application/json" \
+  -d '{"lines":["Smallepad 30E","3811 MG  AMERSFOORT"]}'
+```
+
+```json
+{"valid":true}
+```
+
+`GET /api/v1/ready` is the startup record: `ready`, the data directory,
+postcode / street / city / range counts, and for each of `PCS_HNR.dat`,
+`PCS_STR.dat`, and `PCS_WPL.dat` the file name, byte size, and SHA-256.
+When the process was given an in-memory repository instead of a directory,
+`files` is empty and `source` is `repository`.
+
+Suggest a street. Each hit is the published spelling and the difflib
+ratio of the folded names. `postcode` may be a PC6 (`3811 MG`) or a PC4
+(`3811`). Leave it out to search every street; that call takes a few
+hundred milliseconds.
 
 ```bash
 curl -sG "http://127.0.0.1:8000/api/v1/correct/street" \
@@ -102,11 +132,15 @@ curl -sG "http://127.0.0.1:8000/api/v1/correct/street" \
 ```
 
 ```json
-{"suggestions":["Smallepad"]}
+{"suggestions":[{"name":"Smallepad","score":0.9411764705882353}]}
 ```
 
 Suggest a city. Omitting `postcode` searches the whole city list, which
-stays in the milliseconds.
+stays in the milliseconds. An exact folded match is returned alone, with
+score 1. `include_neighbours=true` also returns other names at or above
+0.6, still at most five and with the exact match first. `ROTTERDAM` scores
+about 0.67 against `Amsterdam`, so it appears when the catalogue is small
+enough; on the full city list closer names take the remaining slots.
 
 ```bash
 curl -sG "http://127.0.0.1:8000/api/v1/correct/city" \
@@ -115,7 +149,7 @@ curl -sG "http://127.0.0.1:8000/api/v1/correct/city" \
 ```
 
 ```json
-{"suggestions":["AMERSFOORT"]}
+{"suggestions":[{"name":"AMERSFOORT","score":0.9473684210526315}]}
 ```
 
 ## Algorithm and data structures
@@ -124,11 +158,12 @@ The loader streams the three tilde-separated files into one
 `InMemoryRepository`:
 
 - `ranges_by_postcode` maps a normalised PC6 (`"1011 AA"` becomes
-  `"1011AA"`) to a short list of `HouseNumberRange` rows. A lookup always
+  `"1011AA"`) to a tuple of `HouseNumberRange` rows. A lookup always
   starts from one postcode, and that postcode has only a few ranges, so
-  the list is scanned linearly. Each range stores street and city ids.
+  the tuple is scanned linearly. Each range stores street and city ids.
   About 629,000 ranges share about 138,000 street names and 2,500 city
-  names instead of repeating the strings.
+  names instead of repeating the strings. The map is a read-only proxy.
+  `ranges_for` returns the stored tuple.
 - `streets` maps a street id to one frozen `Street` record (the published
   name). Street id 0 is absent: a postbus or antwoordnummer has no street
   in the file.
@@ -136,7 +171,8 @@ The loader streams the three tilde-separated files into one
   cities in uppercase (`AMSTERDAM`, `'S-GRAVENHAGE`).
 
 `HouseNumberRange`, `Street`, and `City` are frozen slotted dataclasses.
-The repository is built once and then treated as read-only.
+The street and city maps are read-only as well. Nothing in the repository
+can be appended or replaced after load.
 
 A range matches a house number as follows. Odd (`O`), even (`E`), and
 doorlopend (`D`) ranges step by two from `from_number`, and both ends share
@@ -152,32 +188,43 @@ Postcodes lose their spaces and are uppercased. A PC6 is one digit from
 case, collapses whitespace, and treats curly apostrophes as `'`. Extensions
 are not in the files. A well-formed toevoeging is accepted and printed: one
 letter is glued on (`30E`), a longer token is hyphenated (`30-bis`). An
-empty extension is omitted. Lookup returns the two postal lines, or `[]`
-when the number is absent, the extension is malformed, or more than one
-street contains that number. Validate returns true when the supplied street
-and city match any of those rows.
+empty extension is omitted. Lookup returns the two postal lines when one
+street contains the number. A PC6 that does not contain it is `not_found`.
+The same number on more than one street is `ambiguous`, and the lines are
+not guessed. A postcode, house number, extension, or name the parser
+rejects raises `InvalidAddress`; the API turns that into HTTP 422. Validate
+uses the same split: false, with reason `not_found`, means the input parsed
+and the address is not in the extract. When several streets contain the
+number, a supplied street and city that match one of them is valid.
 
 Suggestions compare `normalise_name` forms with `difflib.SequenceMatcher`
-and return the published spelling. The query is cached on the matcher, then
-each candidate is rejected with `real_quick_ratio` and `quick_ratio` before
-`ratio` is computed. The cutoff is 0.6 and at most five names are returned,
-best score first. Equal scores are ordered by casefolded name, then by the
-published name. A PC6 limits the candidates to that postcode. A PC4 limits
-them to that district, through an index built on the first correction. With
-no postcode every distinct city or street is scored. City search is a few
-milliseconds. Street search is a few hundred milliseconds, which is why a
-postcode should be passed when one is known. `Postbus` and `Antwoordnummer`
-are suggested where those series occur, and on every unscoped street search.
+and return the published spelling together with that ratio. The query is
+cached on the matcher, then each candidate is rejected with
+`real_quick_ratio` and `quick_ratio` before `ratio` is computed. The cutoff
+is 0.6 and at most five names are returned, best score first. An exact
+folded match is returned alone. `include_neighbours` puts the other names
+above the cutoff back in the list, exact match first. Equal scores are
+ordered by casefolded name, then by the published name. A PC6 limits the
+candidates to that postcode. A PC4 limits them to that district. The index
+is built when the service is created, which for the API is during startup,
+before the port accepts connections. With no postcode every distinct city
+or street is scored. City search is a few milliseconds. Street search is a
+few hundred milliseconds, which is why a postcode should be passed when one
+is known. `Postbus` and `Antwoordnummer` are suggested where those series
+occur, and on every unscoped street search. An empty correction query or an
+unusable postcode still returns an empty list: those calls are searches,
+not address checks.
 
 ## Testing
 
 Unit tests call the library in-process. Many of them build a handful of
 ranges in memory. The tests that need the PCS files share one session
 load. Functional tests start `python -m address_validation` on a free
-localhost port, wait until `/openapi.json` answers, and send HTTP requests
-for real addresses (Smallepad 30E in Amersfoort, De Ruyterkade Steigers 7
-in Amsterdam, Postbus 25, and the suggestion lists for `smallepd` and
-`amersfort`). The process is stopped when the session ends.
+localhost port, wait until `/api/v1/ready` reports the extract, and send
+HTTP requests for real addresses (Smallepad 30E in Amersfoort, De
+Ruyterkade Steigers 7 in Amsterdam, Postbus 25, the two-line form, and the
+suggestion lists for `smallepd` and `amersfort`). The process is stopped
+when the session ends.
 
 From the activated virtualenv, at the repository root:
 
@@ -212,6 +259,7 @@ docker build -t address-validation .
 docker run --rm -p 8000:8000 address-validation
 ```
 
-Startup again reads the files before the port accepts connections. The curl
-examples above then work at `http://127.0.0.1:8000`. `ADDRESS_DATA_DIR` in
-the image is `/app/data`.
+Startup again reads the files, hashes them, and builds the suggestion
+index before the port accepts connections. The curl examples above then
+work at `http://127.0.0.1:8000`. `ADDRESS_DATA_DIR` in the image is
+`/app/data`, which is the `source` field of `/api/v1/ready`.

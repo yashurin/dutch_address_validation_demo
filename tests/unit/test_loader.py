@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
 
 from address_validation import (
+    AddressService,
     DataFileError,
     InMemoryRepository,
     Parity,
     SeriesKind,
+    Street,
     create_repository,
 )
 from address_validation.loader import DataLoader
@@ -64,12 +67,12 @@ def test_synthetic_files(tmp_path: Path) -> None:
         SeriesKind.STREET
     ]
     assert repo.matching_ranges("1011AA", 4)[0].parity is Parity.EVEN
-    assert repo.matching_ranges("1011AA", 7) == []
+    assert repo.matching_ranges("1011AA", 7) == ()
 
     box = repo.matching_ranges("1000 AA", 10)[0]
     assert box.kind is SeriesKind.PO_BOX
     assert box.street_id == 0
-    assert repo.matching_ranges("1000AA", 11) == []
+    assert repo.matching_ranges("1000AA", 11) == ()
 
     reply = repo.ranges_for("1000AB")[0]
     assert reply.kind is SeriesKind.REPLY_NUMBER
@@ -79,7 +82,7 @@ def test_synthetic_files(tmp_path: Path) -> None:
     bare = repo.ranges_for("1011AB")[0]
     assert bare.kind is SeriesKind.NO_HOUSE_NUMBER
     assert repo.street_name(bare.street_id) == "Andere AB"
-    assert repo.matching_ranges("1011AB", 0) == [bare]
+    assert repo.matching_ranges("1011AB", 0) == (bare,)
 
     low, high = repo.ranges_for("1011AC")
     assert low.parity is Parity.DOORLOPEND
@@ -88,7 +91,7 @@ def test_synthetic_files(tmp_path: Path) -> None:
     assert high.contains(2)
     assert high.contains(4)
 
-    assert repo.ranges_for("9999ZZ") == []
+    assert repo.ranges_for("9999ZZ") == ()
     assert "postcodes=5" in repr(repo)
 
 
@@ -114,6 +117,34 @@ def test_duplicate_street_id_is_rejected(tmp_path: Path) -> None:
     root = _write(tmp_path, streets="1~A\n1~B\n")
     with pytest.raises(DataFileError, match="duplicate street id 1"):
         DataLoader(root).load()
+
+
+def test_repository_collections_are_frozen(tmp_path: Path) -> None:
+    repo = DataLoader(_write(tmp_path)).load()
+    with pytest.raises(TypeError):
+        repo.streets[9] = Street(9, "Nieuw")
+    with pytest.raises(TypeError):
+        repo.ranges_by_postcode["1011ZZ"] = ()
+    stored = repo.ranges_for("1011AA")
+    with pytest.raises(TypeError):
+        stored[0] = stored[0]
+
+
+def test_load_records_the_extract(tmp_path: Path) -> None:
+    root = _write(tmp_path)
+    service = AddressService.load(root)
+    assert service.extract.source == str(root.resolve())
+    assert [item.name for item in service.extract.files] == [
+        "PCS_HNR.dat",
+        "PCS_STR.dat",
+        "PCS_WPL.dat",
+    ]
+    assert service.extract.postcodes == 5
+    assert service.suggestion_index.cities.published
+    for item in service.extract.files:
+        raw = (root / item.name).read_bytes()
+        assert item.size == len(raw)
+        assert item.sha256 == hashlib.sha256(raw).hexdigest()
 
 
 def test_missing_file(tmp_path: Path) -> None:

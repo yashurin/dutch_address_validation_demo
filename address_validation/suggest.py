@@ -2,8 +2,11 @@
 
 Matching uses :class:`difflib.SequenceMatcher`, the same ratios as
 :func:`difflib.get_close_matches`. Comparison is done on names folded by
-:func:`address_validation.normalise_name`. The strings returned are the
-published spellings, so ``"amsterdm"`` can suggest ``"AMSTERDAM"``.
+:func:`address_validation.normalise_name`. Each result is the published
+spelling plus that ratio, so ``"amsterdm"`` can suggest ``"AMSTERDAM"``.
+
+An exact folded match is returned alone. Other names at or above the
+cutoff stay available when the caller asks for neighbours.
 
 ``get_close_matches`` itself is not called: it would return the folded
 string it compared, and the caller needs the published one.
@@ -20,8 +23,8 @@ them takes a few hundred milliseconds. A PC4 holds a few dozen streets
 on average and a few hundred in the busiest districts. A PC6 usually
 holds one or two. Pass a postcode for street correction when you have one.
 
-The first correction builds this index by walking every house-number
-range once. Later corrections on the same service reuse it.
+:class:`~address_validation.service.AddressService` builds this index
+when the service is created, by walking every house-number range once.
 """
 
 from __future__ import annotations
@@ -51,6 +54,19 @@ SUGGESTION_LIMIT = 5
 
 _PC4 = re.compile(r"^[1-9][0-9]{3}$")
 _Scope = tuple[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class Suggestion:
+    """One published spelling and its difflib ratio against the folded query.
+
+    ``score`` is 1 when the folded names are equal. Otherwise it is the
+    :meth:`difflib.SequenceMatcher.ratio`, from the cutoff up to, but not
+    including, 1.
+    """
+
+    name: str
+    score: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,18 +134,36 @@ class SuggestionIndex:
         repository: InMemoryRepository,
         city: str,
         postcode: str | None,
-    ) -> list[str]:
+        *,
+        include_neighbours: bool = False,
+    ) -> list[Suggestion]:
         """Rank city suggestions. See :meth:`AddressService.correct_city`."""
-        return self._correct(repository, self.cities, city, postcode, streets=False)
+        return self._correct(
+            repository,
+            self.cities,
+            city,
+            postcode,
+            streets=False,
+            include_neighbours=include_neighbours,
+        )
 
     def correct_street(
         self,
         repository: InMemoryRepository,
         street: str,
         postcode: str | None,
-    ) -> list[str]:
+        *,
+        include_neighbours: bool = False,
+    ) -> list[Suggestion]:
         """Rank street suggestions. See :meth:`AddressService.correct_street`."""
-        return self._correct(repository, self.streets, street, postcode, streets=True)
+        return self._correct(
+            repository,
+            self.streets,
+            street,
+            postcode,
+            streets=True,
+            include_neighbours=include_neighbours,
+        )
 
     def _correct(
         self,
@@ -139,7 +173,8 @@ class SuggestionIndex:
         postcode: str | None,
         *,
         streets: bool,
-    ) -> list[str]:
+        include_neighbours: bool,
+    ) -> list[Suggestion]:
         scope = _parse_scope(postcode)
         if scope is None:
             return []
@@ -154,7 +189,13 @@ class SuggestionIndex:
             postbus_index=self.postbus_index if streets else None,
             reply_index=self.reply_index if streets else None,
         )
-        return rank_suggestions(folded, names.normalised, names.published, indexes)
+        return rank_suggestions(
+            folded,
+            names.normalised,
+            names.published,
+            indexes,
+            include_neighbours=include_neighbours,
+        )
 
 
 def rank_suggestions(
@@ -165,8 +206,9 @@ def rank_suggestions(
     *,
     limit: int = SUGGESTION_LIMIT,
     cutoff: float = SUGGESTION_CUTOFF,
-) -> list[str]:
-    """Return up to ``limit`` published names, best difflib score first.
+    include_neighbours: bool = False,
+) -> list[Suggestion]:
+    """Return up to ``limit`` suggestions, best difflib score first.
 
     ``indexes is None`` scores every name. Otherwise only those positions
     are scored. A name is kept when ``real_quick_ratio``, ``quick_ratio``
@@ -174,6 +216,10 @@ def rank_suggestions(
     :func:`difflib.get_close_matches` decides. Equal scores are ordered by
     casefolded published name, then by the published name, so the list
     does not depend on catalogue order.
+
+    When a folded candidate equals ``folded_query`` and
+    ``include_neighbours`` is false, only those exact matches are returned.
+    The flag puts the other names above ``cutoff`` back, exact match first.
     """
     if limit < 1:
         return []
@@ -183,23 +229,26 @@ def rank_suggestions(
     matcher = difflib.SequenceMatcher()
     matcher.set_seq2(folded_query)
     positions = range(len(published)) if indexes is None else indexes
-    scored: list[tuple[float, str]] = []
+    scored: list[tuple[float, str, bool]] = []
     for index in positions:
-        matcher.set_seq1(normalised[index])
+        folded_name = normalised[index]
+        matcher.set_seq1(folded_name)
         if matcher.real_quick_ratio() < cutoff or matcher.quick_ratio() < cutoff:
             continue
         score = matcher.ratio()
         if score < cutoff:
             continue
-        scored.append((score, published[index]))
+        scored.append((score, published[index], folded_name == folded_query))
+    if not include_neighbours and any(exact for _score, _name, exact in scored):
+        scored = [item for item in scored if item[2]]
     scored.sort(key=lambda item: (-item[0], item[1].casefold(), item[1]))
-    unique: list[str] = []
+    unique: list[Suggestion] = []
     seen: set[str] = set()
-    for _score, name in scored:
+    for score, name, _exact in scored:
         if name in seen:
             continue
         seen.add(name)
-        unique.append(name)
+        unique.append(Suggestion(name, score))
         if len(unique) == limit:
             break
     return unique

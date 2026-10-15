@@ -7,8 +7,10 @@ street or city name: those live once each in the id indexes on
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum, IntEnum
+from types import MappingProxyType
 
 from address_validation.postcode import normalise_postcode
 
@@ -169,36 +171,45 @@ class City:
 
 # Chosen in-memory structures
 # ---------------------------
-# ranges_by_postcode: dict[PC6, list[HouseNumberRange]]
+# ranges_by_postcode: Mapping[PC6, tuple[HouseNumberRange, ...]]
 #     Keyed by the normalised postcode ("1011 AA" -> "1011AA"). Validation
 #     always starts from one postcode, and that postcode has only a few
 #     ranges (an odd series, an even series, sometimes a second street).
-#     A short list scanned linearly is smaller and faster than an interval
+#     A short tuple scanned linearly is smaller and faster than an interval
 #     tree. Each range stores street and city *ids*, not names, so the
 #     ~629k range rows do not repeat those strings.
 #
-# streets: dict[street_id, Street]
-# cities:  dict[city_id, City]
+# streets: Mapping[street_id, Street]
+# cities:  Mapping[city_id, City]
 #     One slotted record per id, which is the id -> name index with the
 #     name stored once on the record. Street id 0 is absent on purpose:
 #     a postbus or antwoordnummer range has no street.
 #
-# HouseNumberRange, Street and City are frozen slotted dataclasses. The
-# records do not change after load, slots avoid a per-instance __dict__,
-# and frozen stops a caller from editing a row inside the table.
+# HouseNumberRange, Street and City are frozen slotted dataclasses.
+# InMemoryRepository copies its three maps into MappingProxyType and stores
+# each postcode's ranges as a tuple, so a caller cannot append a row or
+# replace a name after load.
 
 
 @dataclass(frozen=True, slots=True, repr=False)
 class InMemoryRepository:
     """Ready-to-query postcode, street and city tables.
 
-    Treat the three dicts as read-only. The repository is frozen, but the
-    dicts and lists inside it are ordinary mutable containers.
+    The three maps are read-only proxies. Each postcode maps to a tuple of
+    ranges. ``ranges_for`` returns that tuple.
     """
 
-    ranges_by_postcode: dict[str, list[HouseNumberRange]]
-    streets: dict[int, Street]
-    cities: dict[int, City]
+    ranges_by_postcode: Mapping[str, tuple[HouseNumberRange, ...]]
+    streets: Mapping[int, Street]
+    cities: Mapping[int, City]
+
+    def __post_init__(self) -> None:
+        ranges = {
+            postcode: tuple(rows) for postcode, rows in self.ranges_by_postcode.items()
+        }
+        object.__setattr__(self, "ranges_by_postcode", MappingProxyType(ranges))
+        object.__setattr__(self, "streets", MappingProxyType(dict(self.streets)))
+        object.__setattr__(self, "cities", MappingProxyType(dict(self.cities)))
 
     def __repr__(self) -> str:
         return (
@@ -208,32 +219,34 @@ class InMemoryRepository:
             f"cities={len(self.cities)})"
         )
 
-    def ranges_for(self, postcode: str) -> list[HouseNumberRange]:
+    def ranges_for(self, postcode: str) -> tuple[HouseNumberRange, ...]:
         """Return the ranges on ``postcode``.
 
         ``postcode`` is normalised first. A well-formed postcode that is
-        not in the table returns an empty list.
+        not in the table returns an empty tuple. The tuple is the one
+        stored on the repository.
 
         Raises:
             ValueError: ``postcode`` is not a Dutch PC6.
         """
-        return self.ranges_by_postcode.get(normalise_postcode(postcode), [])
+        return self.ranges_by_postcode.get(normalise_postcode(postcode), ())
 
     def matching_ranges(
         self, postcode: str, house_number: int
-    ) -> list[HouseNumberRange]:
+    ) -> tuple[HouseNumberRange, ...]:
         """Return every range on ``postcode`` that contains ``house_number``.
 
         A PC6 occasionally covers two streets, so more than one range can
-        match. An unknown postcode returns an empty list.
+        match. An unknown postcode returns an empty tuple. The result is a
+        new tuple, not the stored series.
         """
         if house_number < 0:
             raise ValueError(f"house_number must be >= 0, got {house_number}")
-        return [
+        return tuple(
             range_
             for range_ in self.ranges_for(postcode)
             if range_.contains(house_number)
-        ]
+        )
 
     def street_name(self, street_id: int) -> str | None:
         """Return the street name, or ``None`` when the id is unknown.

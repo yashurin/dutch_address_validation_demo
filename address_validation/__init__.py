@@ -26,7 +26,13 @@ from address_validation.models import (
 )
 from address_validation.normalise import normalise_extension, normalise_name
 from address_validation.postcode import format_postcode, normalise_postcode
-from address_validation.service import AddressService
+from address_validation.service import (
+    AddressService,
+    InvalidAddress,
+    LookupReason,
+    LookupResult,
+)
+from address_validation.suggest import Suggestion
 
 __all__ = [
     "CITY_FILE",
@@ -39,11 +45,15 @@ __all__ = [
     "DataLoader",
     "HouseNumberRange",
     "InMemoryRepository",
+    "InvalidAddress",
+    "LookupReason",
+    "LookupResult",
     "PO_BOX_STREET",
     "Parity",
     "REPLY_STREET",
     "SeriesKind",
     "Street",
+    "Suggestion",
     "create_repository",
     "format_postcode",
     "normalise_extension",

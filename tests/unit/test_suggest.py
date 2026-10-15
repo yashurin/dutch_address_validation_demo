@@ -7,6 +7,8 @@ unscoped national street scan happens only once.
 
 from __future__ import annotations
 
+import difflib
+
 import pytest
 
 from address_validation import (
@@ -18,8 +20,14 @@ from address_validation import (
     Parity,
     SeriesKind,
     Street,
+    Suggestion,
 )
 from address_validation.suggest import SUGGESTION_LIMIT, rank_suggestions
+
+
+def _names(suggestions: list[Suggestion]) -> list[str]:
+    return [item.name for item in suggestions]
+
 
 _CITY_TYPO = ["AMERSFOORT", "AKERSLOOT", "AMMERSTOL", "MERSELO", "STAMPERSGAT"]
 _STREET_TYPO = [
@@ -32,21 +40,27 @@ _STREET_TYPO = [
 
 
 def test_correct_city_with_and_without_postcode(service: AddressService) -> None:
-    assert service.correct_city("amersfort", "3811 MG") == ["AMERSFOORT"]
-    assert service.correct_city("amersfort", "3811") == ["AMERSFOORT"]
+    scoped = service.correct_city("amersfort", "3811 MG")
+    assert _names(scoped) == ["AMERSFOORT"]
+    assert scoped[0].score == pytest.approx(
+        difflib.SequenceMatcher(None, "amersfort", "amersfoort").ratio()
+    )
+    assert _names(service.correct_city("amersfort", "3811")) == ["AMERSFOORT"]
     assert service.correct_city("amersfort", "1011 AA") == []
-    assert service.correct_city("amersfort") == _CITY_TYPO
-    assert service.correct_city("amersfort", postcode=None) == _CITY_TYPO
+    assert _names(service.correct_city("amersfort")) == _CITY_TYPO
+    assert service.correct_city("amersfort", postcode=None) == service.correct_city(
+        "amersfort"
+    )
 
 
 def test_correct_street_with_and_without_postcode(service: AddressService) -> None:
-    assert service.correct_street("smallepd", "3811 MG") == ["Smallepad"]
-    assert service.correct_street("smallepd", " 3811 ") == ["Smallepad"]
+    assert _names(service.correct_street("smallepd", "3811 MG")) == ["Smallepad"]
+    assert _names(service.correct_street("smallepd", " 3811 ")) == ["Smallepad"]
     assert service.correct_street("smallepd", "1011 AA") == []
     broad = service.correct_street("smallepd")
-    assert broad == _STREET_TYPO
+    assert _names(broad) == _STREET_TYPO
     assert service.correct_street("smallepd", postcode=None) == broad
-    assert len(broad) == len(set(broad))
+    assert len(broad) == len({item.name for item in broad})
 
 
 @pytest.mark.parametrize("method_name", ["correct_city", "correct_street"])
@@ -76,17 +90,35 @@ def test_correction_rejects_empty_input_and_invalid_postcode(
 def test_equal_scores_use_the_published_name() -> None:
     published = ("Kerkstraat", "Kerk straat", "Kerkstraat")
     normalised = ("kerkstraat", "kerkstraat", "kerkstraat")
-    assert rank_suggestions("kerkstraat", normalised, published, None) == [
-        "Kerk straat",
-        "Kerkstraat",
-    ]
+    ranked = rank_suggestions("kerkstraat", normalised, published, None)
+    assert _names(ranked) == ["Kerk straat", "Kerkstraat"]
+    assert [item.score for item in ranked] == [1.0, 1.0]
+
+
+def test_exact_match_hides_neighbours_unless_asked() -> None:
+    published = ("AMSTERDAM", "ROTTERDAM")
+    normalised = ("amsterdam", "rotterdam")
+    alone = rank_suggestions("amsterdam", normalised, published, None)
+    assert _names(alone) == ["AMSTERDAM"]
+    assert alone[0].score == 1.0
+    both = rank_suggestions(
+        "amsterdam",
+        normalised,
+        published,
+        None,
+        include_neighbours=True,
+    )
+    assert _names(both) == ["AMSTERDAM", "ROTTERDAM"]
+    assert both[1].score == pytest.approx(
+        difflib.SequenceMatcher(None, "amsterdam", "rotterdam").ratio()
+    )
 
 
 def test_limit_keeps_the_best_names() -> None:
     published = tuple(f"Name {index}" for index in range(SUGGESTION_LIMIT + 1))
     normalised = ("same",) * len(published)
     ranked = rank_suggestions("same", normalised, published, None)
-    assert ranked == sorted(published, key=str.casefold)[:SUGGESTION_LIMIT]
+    assert _names(ranked) == sorted(published, key=str.casefold)[:SUGGESTION_LIMIT]
 
 
 @pytest.fixture
@@ -139,41 +171,59 @@ def sample_service() -> AddressService:
     )
 
 
+def test_suggestion_index_is_built_with_the_service(
+    sample_service: AddressService,
+) -> None:
+    index = sample_service.suggestion_index
+    assert "AMSTERDAM" in index.cities.published
+    assert index is sample_service.suggestion_index
+
+
 def test_sample_scope_ranks_unique_names(sample_service: AddressService) -> None:
     service = sample_service
-    # Folded "amsterdam" and "rotterdam" score 0.67, so the exact spelling
-    # still lists the neighbour after itself. The typo stays under that.
-    assert service.correct_city("amsterdm") == ["AMSTERDAM"]
-    assert service.correct_city("  AmSterDaM ") == ["AMSTERDAM", "ROTTERDAM"]
-    assert service.correct_city("amsterdm", "1011 AA") == ["AMSTERDAM"]
-    assert service.correct_city("amsterdm", " 1011 ") == ["AMSTERDAM"]
-    assert service.correct_city("rotterdm", "3011AA") == ["ROTTERDAM"]
+    # Folded "amsterdam" and "rotterdam" score about 0.67. The exact
+    # spelling is returned alone. The typo stays under the neighbour.
+    assert _names(service.correct_city("amsterdm")) == ["AMSTERDAM"]
+    exact = service.correct_city("  AmSterDaM ")
+    assert _names(exact) == ["AMSTERDAM"]
+    assert exact[0].score == 1.0
+    neighbours = service.correct_city("  AmSterDaM ", include_neighbours=True)
+    assert _names(neighbours) == ["AMSTERDAM", "ROTTERDAM"]
+    assert neighbours[0].score == 1.0
+    assert service.correct_city("amsterdm", include_neighbours=True) == (
+        service.correct_city("amsterdm")
+    )
+    assert _names(service.correct_city("amsterdm", "1011 AA")) == ["AMSTERDAM"]
+    assert _names(service.correct_city("amsterdm", " 1011 ")) == ["AMSTERDAM"]
+    assert _names(service.correct_city("rotterdm", "3011AA")) == ["ROTTERDAM"]
     assert service.correct_city("amsterdm", "3011 AA") == []
     assert service.correct_city("rotterdm", "1011") == []
 
-    scoped = service.correct_street("kerkstr", "1011")
+    scoped = _names(service.correct_street("kerkstr", "1011"))
     assert scoped[0] == "Kerkstraat"
     assert scoped.count("Kerkstraat") == 1
     assert scoped.index("Kerkstraat") < scoped.index("Klerkstraat")
     assert "Kalverstraat" not in scoped
-    assert service.correct_street("kerkstr", "1011 AC") == ["Kerkstraat"]
-    assert service.correct_street("de ruyterkade steiger", "1011AA") == [
+    assert _names(service.correct_street("kerkstr", "1011 AC")) == ["Kerkstraat"]
+    assert _names(service.correct_street("de ruyterkade steiger", "1011AA")) == [
         "De Ruyterkade Steigers"
     ]
-    assert service.correct_street("de ruyterkade steiger", "1011 AB") == [
+    assert _names(service.correct_street("de ruyterkade steiger", "1011 AB")) == [
         "De Ruyterkade"
     ]
-    district = service.correct_street("de ruyterkade steiger", "1011")
+    district = _names(service.correct_street("de ruyterkade steiger", "1011"))
     assert district.index("De Ruyterkade Steigers") < district.index("De Ruyterkade")
-    assert service.correct_street("kalverstr")[0] == "Kalverstraat"
-    assert service.correct_street("kalverstr", postcode=None)[0] == "Kalverstraat"
+    assert _names(service.correct_street("kalverstr"))[0] == "Kalverstraat"
+    assert _names(service.correct_street("kalverstr", postcode=None))[0] == (
+        "Kalverstraat"
+    )
 
-    assert service.correct_street("postbux", "1000 AA") == [PO_BOX_STREET]
+    assert _names(service.correct_street("postbux", "1000 AA")) == [PO_BOX_STREET]
     assert service.correct_street("postbux", "1011 AA") == []
-    assert service.correct_street("postbux") == [PO_BOX_STREET]
-    assert service.correct_street("\u2019s gravelandseveer", "1012 aa") == [
+    assert _names(service.correct_street("postbux")) == [PO_BOX_STREET]
+    assert _names(service.correct_street("\u2019s gravelandseveer", "1012 aa")) == [
         "'s Gravelandseveer"
     ]
-    assert service.correct_street("gravelandseveer", "1012AA")[0] == (
+    assert _names(service.correct_street("gravelandseveer", "1012AA"))[0] == (
         "'s Gravelandseveer"
     )
